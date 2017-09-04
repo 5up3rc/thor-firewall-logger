@@ -1,4 +1,9 @@
-# inspired by: https://github.com/bootc/ulogd2/blob/debian/doc/mysql-ulogd2.sql
+# -----------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# ULOGD v2 SQL Logging Scheme
+# inspired by: https://git.netfilter.org/ulogd2/tree/doc/mysql-ulogd2-flat.sql
+# -----------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 # CREATE/UPDATE STRUCTURE
 SET foreign_key_checks = 0;
