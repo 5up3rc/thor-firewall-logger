@@ -17,6 +17,7 @@ firewall event logging via [nflog netlink](https://git.netfilter.org/libnfnetlin
 * **Multi Host** Log Aggregation using dedicated sql-user
 * Packet-Logging is splitted using the ip-protocol (tcp, udp, sctp, icmp, icmpv6)
 * Interfaces, Remotes, Prefixes and MAC Relation tables are separated
+* Inserts Records via Stored-Procedures
 * Designed to be used with [mariadb](https://mariadb.org) or [mysql](https://mysql.com)
 * Includes Human-Readble Analaytics View
 * Created as component of [thor-firewall](https://github.com/AenonDynamics/thor-firewall)
@@ -54,7 +55,7 @@ mysql -p --database=thor_firewall < packet-logging.sql
 
 # initialize custom systemd service (restart on error)
 cp systemd/ulogd2.service /etc/systemd/system/ulogd2.service
-systemctl daemnon-reload
+systemctl daemon-reload
 systemctl restart ulogd2
 ```
 
