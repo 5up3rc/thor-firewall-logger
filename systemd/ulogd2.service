@@ -8,7 +8,7 @@ ExecStart=/usr/sbin/ulogd --daemon --uid ulog --pidfile /run/ulog/ulogd.pid
 
 # Restart Logger on failure (db might not be available on startup!)
 Restart=always
-RestartSec=10
+RestartSec=20
 
 [Install]
 Alias=ulogd.service
