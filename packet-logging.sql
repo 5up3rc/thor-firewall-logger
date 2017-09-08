@@ -19,6 +19,7 @@ DROP VIEW IF EXISTS `ulogd2_fields`;
 CREATE VIEW `ulogd2_fields` AS
     SELECT
         NULL as _id,
+
         NULL as oob_time_sec,
         NULL as oob_time_usec,
         NULL as oob_hook,
@@ -27,6 +28,8 @@ CREATE VIEW `ulogd2_fields` AS
         NULL as oob_in,
         NULL as oob_out,
         NULL as oob_family,
+        NULL as oob_protocol,
+
         NULL as ip_saddr_bin,
         NULL as ip_daddr_bin,
         NULL as ip_protocol,
@@ -37,12 +40,14 @@ CREATE VIEW `ulogd2_fields` AS
         NULL as ip_csum,
         NULL as ip_id,
         NULL as ip_fragoff,
+        
         NULL as ip6_payloadlen,
         NULL as ip6_priority,
         NULL as ip6_hoplimit,
         NULL as ip6_flowlabel,
         NULL as ip6_fragoff,
         NULL as ip6_fragid,
+        
         NULL as tcp_sport,
         NULL as tcp_dport,
         NULL as tcp_seq,
@@ -55,29 +60,35 @@ CREATE VIEW `ulogd2_fields` AS
         NULL as tcp_rst,
         NULL as tcp_syn,
         NULL as tcp_fin,
+        
         NULL as udp_sport,
         NULL as udp_dport,
         NULL as udp_len,
+        
         NULL as icmp_type,
         NULL as icmp_code,
         NULL as icmp_echoid,
         NULL as icmp_echoseq,
         NULL as icmp_gateway,
         NULL as icmp_fragmtu,
+        
         NULL as icmpv6_type,
         NULL as icmpv6_code,
         NULL as icmpv6_echoid,
         NULL as icmpv6_echoseq,
         NULL as icmpv6_csum,
+        
+        NULL as sctp_sport,
+        NULL as sctp_dport,
+        NULL as sctp_csum,
+
+        NULL as raw_label,
         NULL as raw_type,
         #NULL as raw_header,
         NULL as mac_saddr_str,
-        NULL as mac_daddr_str,
-        NULL as oob_protocol,
-        NULL as raw_label,
-        NULL as sctp_sport,
-        NULL as sctp_dport,
-        NULL as sctp_csum;
+        NULL as mac_daddr_str
+        
+        ;
 
 # ip packet logging
 # -----------------------------------------------------------------------
@@ -157,7 +168,7 @@ CREATE TABLE `prefix_types` (
     `prefix` varchar(32) default NULL,
 
     PRIMARY KEY `_prefix_id` (`_prefix_id`),
-    UNIQUE `prefix` (`prefix`)
+    KEY `prefix` (`prefix`)
 
 ) ENGINE=INNODB DEFAULT CHARSET=utf8;
 
@@ -169,7 +180,7 @@ CREATE TABLE `interfaces` (
     `interface_name` varchar(32) default NULL,
 
     PRIMARY KEY `_interface_id` (`_interface_id`),
-    UNIQUE `interface_name` (`interface_name`)
+    KEY `interface_name` (`interface_name`)
 
 ) ENGINE=INNODB DEFAULT CHARSET=utf8;
 
@@ -178,12 +189,12 @@ CREATE TABLE `interfaces` (
 DROP TABLE IF EXISTS `mac`;
 CREATE TABLE `mac` (
     `_mac_id` bigint unsigned NOT NULL AUTO_INCREMENT,
-    `mac_saddr` varchar(32) default NULL,
-    `mac_daddr` varchar(32) default NULL,
-    `mac_protocol` smallint(5) default NULL,
+    `mac_src` varchar(20) default NULL,
+    `mac_dst` varchar(20) default NULL,
+    `mac_type` smallint(5) unsigned default NULL,
 
     PRIMARY KEY `_mac_id` (`_mac_id`),
-    UNIQUE `mac_addr` (`mac_saddr`,`mac_daddr`,`mac_protocol`)
+    KEY `mac_addr` (`mac_src`,`mac_dst`,`mac_type`)
 
 ) ENGINE=INNODB DEFAULT CHARSET=utf8;
 
@@ -195,7 +206,7 @@ CREATE TABLE `remotes` (
     `user` varchar(50) NOT NULL,
 
     PRIMARY KEY `_remote_id` (`_remote_id`),
-    UNIQUE `user` (`user`)
+    KEY `user` (`user`)
 
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
@@ -481,13 +492,19 @@ delimiter ;
 DROP FUNCTION IF EXISTS INSERT_OR_SELECT_MAC;
 delimiter $$
 CREATE FUNCTION INSERT_OR_SELECT_MAC(
-        `_saddr` varchar(32),
-        `_daddr` varchar(32),
+        `_saddr` varchar(20),
+        `_daddr` varchar(20),
         `_protocol` smallint(5)
         ) RETURNS bigint unsigned
 BEGIN
-    INSERT IGNORE INTO mac (mac_saddr, mac_daddr, mac_protocol) VALUES (_saddr, _daddr, _protocol);
-    SELECT _mac_id FROM mac WHERE mac_saddr = _saddr AND mac_daddr = _daddr AND mac_protocol = _protocol LIMIT 1 INTO @MAC_ID;
+    SELECT _mac_id FROM mac WHERE mac_src = _saddr AND mac_dst = _daddr AND mac_type = _protocol LIMIT 1 INTO @MAC_ID;
+
+    # entry exists ?
+    IF @MAC_ID IS NULL THEN
+        INSERT INTO mac (mac_src, mac_dst, mac_type) VALUES (_saddr, _daddr, _protocol);
+        SET @MAC_ID = LAST_INSERT_ID();
+    END IF;
+
     RETURN @MAC_ID;
 END
 $$
@@ -501,8 +518,14 @@ CREATE FUNCTION INSERT_OR_SELECT_PREFIX(
         `_prefix` varchar(32)
         ) RETURNS int(10) unsigned
 BEGIN
-    INSERT IGNORE INTO prefix_types (prefix) VALUES (_prefix);
     SELECT _prefix_id FROM prefix_types WHERE prefix = _prefix LIMIT 1 INTO @PF_ID;
+    
+    # entry exists ?
+    IF @PF_ID IS NULL THEN
+        INSERT INTO prefix_types (prefix) VALUES (_prefix);
+        SET @PF_ID = LAST_INSERT_ID();
+    END IF;
+    
     RETURN @PF_ID;
 END
 $$
@@ -516,8 +539,14 @@ CREATE FUNCTION INSERT_OR_SELECT_INTERFACE(
         `_interface` varchar(32)
         ) RETURNS smallint(5) unsigned
 BEGIN
-    INSERT IGNORE INTO interfaces (interface_name) VALUES (_interface);
     SELECT _interface_id FROM interfaces WHERE interface_name = _interface LIMIT 1 INTO @IF_ID;
+
+    # entry exists ?
+    IF @IF_ID IS NULL THEN
+        INSERT INTO interfaces (interface_name) VALUES (_interface);
+        SET @IF_ID = LAST_INSERT_ID();
+    END IF;
+        
     RETURN @IF_ID;
 END
 $$
@@ -531,8 +560,14 @@ CREATE FUNCTION INSERT_OR_SELECT_REMOTE(
         ) RETURNS int(10) unsigned
 BEGIN
     # get remote_id by current user (multihost logging)
-    INSERT IGNORE INTO `remotes` SET `user`=USER();
     SELECT `_remote_id` FROM `remotes` WHERE `user`=USER() LIMIT 1 INTO @REMOTE_ID;
+
+    # entry exists ?
+    IF @REMOTE_ID IS NULL THEN
+        INSERT INTO `remotes` SET `user`=USER();
+        SET @REMOTE_ID = LAST_INSERT_ID();
+    END IF;
+    
     RETURN @REMOTE_ID;
 END
 $$
@@ -567,6 +602,8 @@ CREATE PROCEDURE CALL_ULOGD2_INSERT(
         IN `_oob_in` varchar(32),
         IN `_oob_out` varchar(32),
         IN `_oob_family` tinyint(3) unsigned,
+        IN `_oob_protocol` smallint(5) unsigned,
+        
         IN `_ip_saddr` binary(16),
         IN `_ip_daddr` binary(16),
         IN `_ip_protocol` tinyint(3) unsigned,
@@ -577,12 +614,14 @@ CREATE PROCEDURE CALL_ULOGD2_INSERT(
         IN `_ip_csum` smallint(5) unsigned,
         IN `_ip_id` smallint(5) unsigned,
         IN `_ip_fragoff` smallint(5) unsigned,
+
         IN `_ip6_payloadlen` smallint unsigned,
         IN `_ip6_priority` tinyint(3) unsigned,
         IN `_ip6_hoplimit` tinyint(3) unsigned,
         IN `_ip6_flowlabel` int(10),
         IN `_ip6_fragoff` smallint(5),
         IN `_ip6_fragid` int(10) unsigned,
+
         IN `tcp_sport` smallint(5) unsigned,
         IN `tcp_dport` smallint(5) unsigned,
         IN `tcp_seq` int(10) unsigned,
@@ -595,29 +634,34 @@ CREATE PROCEDURE CALL_ULOGD2_INSERT(
         IN `tcp_rst` tinyint(1),
         IN `tcp_syn` tinyint(1),
         IN `tcp_fin` tinyint(1),
+
         IN `udp_sport` smallint(5) unsigned,
         IN `udp_dport` smallint(5) unsigned,
         IN `udp_len` smallint(5) unsigned,
+
         IN `icmp_type` tinyint(3) unsigned,
         IN `icmp_code` tinyint(3) unsigned,
         IN `icmp_echoid` smallint(5) unsigned,
         IN `icmp_echoseq` smallint(5) unsigned,
         IN `icmp_gateway` int(10) unsigned,
         IN `icmp_fragmtu` smallint(5) unsigned,
+
         IN `icmpv6_type` tinyint(3) unsigned,
         IN `icmpv6_code` tinyint(3) unsigned,
         IN `icmpv6_echoid` smallint(5) unsigned,
         IN `icmpv6_echoseq` smallint(5) unsigned,
         IN `icmpv6_csum` int(10) unsigned,
-        IN `raw_type` int(10) unsigned,
-        #raw_header varchar(256),
-        IN `mac_saddr` varchar(32),
-        IN `mac_daddr` varchar(32),
-        IN `mac_protocol` smallint(5) unsigned,
-        IN `_label` tinyint(3) unsigned,
+
         IN `sctp_sport` smallint(5) unsigned,
         IN `sctp_dport` smallint(5) unsigned,
-        IN `sctp_csum` int(10) unsigned
+        IN `sctp_csum` int(10) unsigned,
+
+        IN `raw_label` tinyint(3) unsigned,
+        IN `raw_type` int(10) unsigned,
+        IN `mac_saddr_str` varchar(20),
+        IN `mac_daddr_str` varchar(20)
+        
+        #raw_header varchar(256),
         )
 BEGIN
 
@@ -634,10 +678,10 @@ BEGIN
     # get remote
     SET @REMOTE_ID = INSERT_OR_SELECT_REMOTE();
 
-    # STD Packet ?
-    IF raw_type = 1 THEN
+    # STD Packet ? And valid mac (layer 2 traffic) ?
+    IF (raw_type = 1 AND mac_saddr_str IS NOT NULL AND mac_daddr_str IS NOT NULL) THEN
         # insert/get MAC transport relation
-        SET @MAC_ID = INSERT_OR_SELECT_MAC(mac_saddr, mac_daddr, mac_protocol);
+        SET @MAC_ID = INSERT_OR_SELECT_MAC(mac_saddr_str, mac_daddr_str, _oob_protocol);
     END IF;
 
     # insert meta packet (after related items to ensure integrity)
@@ -645,7 +689,7 @@ BEGIN
                         _oob_time_sec, _oob_time_usec, _oob_hook, _oob_mark, _oob_family, 
                         _ip_saddr, _ip_daddr, _ip_protocol, _ip_tos, _ip_ttl, _ip_totlen, _ip_ihl, _ip_csum, _ip_id, _ip_fragoff, 
                         _ip6_payloadlen, _ip6_priority, _ip6_hoplimit, _ip6_flowlabel, _ip6_fragoff, _ip6_fragid, 
-                        _label);
+                        raw_label);
 
     # low level Packet ?
     IF raw_type != 1 THEN
@@ -909,16 +953,16 @@ CREATE VIEW `log` AS
         `packets`.`ip_daddr`, `packets`.`ip_saddr`, `packets`.`ip_protocol`,
 
         # plain text protocols/types
-        `icmp_types`.`icmp_type_name`, `ip_protocols`.`ip_protocol_name`, `ip_protocols`.`ip_protocol_description`,
+        `ip_protocols`.`ip_protocol_name`, `ip_protocols`.`ip_protocol_description`,
 
         # remote host, mac
-        `mac`.*, 
+        `mac`.`mac_src`, `mac`.`mac_dst`,
         
         # packet protocol tables
+        `tcp`.`tcp_sport`, `tcp`.`tcp_dport`,
         `udp`.`udp_sport`, `udp`.`udp_dport`, `udp`.`udp_len`,
-        `sctp`.`sctp_sport`, `sctp`.`sctp_dport`, `sctp`.`sctp_csum`,
-        `icmp`.`icmp_type`, `icmp`.`icmp_code`, `icmp`.`icmp_gateway`,
-        `tcp`.`tcp_sport`, `tcp`.`tcp_dport`
+        `icmp`.`icmp_type`, `icmp_types`.`icmp_type_name`, `icmp`.`icmp_code`, `icmp`.`icmp_gateway`,
+        `sctp`.`sctp_sport`, `sctp`.`sctp_dport`, `sctp`.`sctp_csum`
     
     FROM `packets`
         
@@ -933,7 +977,9 @@ CREATE VIEW `log` AS
         LEFT JOIN `icmp` USING(`_packet_id`)
         
         LEFT JOIN `icmp_types` USING(`icmp_type`)
-        LEFT JOIN `ip_protocols` USING(`ip_protocol`);
+        LEFT JOIN `ip_protocols` USING(`ip_protocol`)
+        
+    ORDER BY `_packet_id` DESC;
 
 
 # CREATE/UPDATE STRUCTURE FINISHED
