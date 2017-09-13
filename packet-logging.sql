@@ -494,18 +494,31 @@ delimiter $$
 CREATE FUNCTION INSERT_OR_SELECT_MAC(
         `_saddr` varchar(20),
         `_daddr` varchar(20),
-        `_protocol` smallint(5)
-        ) RETURNS bigint unsigned
+        `_protocol` smallint(5),
+        `_raw_type` int(10) unsigned
+    ) 
+    RETURNS bigint unsigned
+    DETERMINISTIC
+    MODIFIES SQL DATA
 BEGIN
-    SELECT _mac_id FROM mac WHERE mac_src = _saddr AND mac_dst = _daddr AND mac_type = _protocol LIMIT 1 INTO @MAC_ID;
+    # local scope!
+    DECLARE MAC_ID BIGINT unsigned DEFAULT NULL;
 
-    # entry exists ?
-    IF @MAC_ID IS NULL THEN
-        INSERT INTO mac (mac_src, mac_dst, mac_type) VALUES (_saddr, _daddr, _protocol);
-        SET @MAC_ID = LAST_INSERT_ID();
+    # STD Packet ? And valid mac (layer 2 traffic) ?
+    # ignore routed l3 traffic!
+    IF (_raw_type != 1 OR _saddr IS NULL OR _daddr IS NULL) THEN
+        RETURN NULL;
     END IF;
 
-    RETURN @MAC_ID;
+    SELECT _mac_id FROM mac WHERE mac_src = _saddr AND mac_dst = _daddr AND mac_type = _protocol LIMIT 1 INTO MAC_ID;
+
+    # entry exists ?
+    IF MAC_ID IS NOT NULL THEN
+        RETURN MAC_ID;
+    ELSE
+        INSERT INTO mac (mac_src, mac_dst, mac_type) VALUES (_saddr, _daddr, _protocol);
+        RETURN LAST_INSERT_ID();
+    END IF;
 END
 $$
 delimiter ;
@@ -516,17 +529,23 @@ DROP FUNCTION IF EXISTS INSERT_OR_SELECT_PREFIX;
 delimiter $$
 CREATE FUNCTION INSERT_OR_SELECT_PREFIX(
         `_prefix` varchar(32)
-        ) RETURNS int(10) unsigned
+    )
+    RETURNS int(10) unsigned
+    DETERMINISTIC
+    MODIFIES SQL DATA
 BEGIN
-    SELECT _prefix_id FROM prefix_types WHERE prefix = _prefix LIMIT 1 INTO @PF_ID;
+    # local scope!
+    DECLARE PF_ID INT(10) unsigned DEFAULT NULL;
+
+    SELECT _prefix_id FROM prefix_types WHERE prefix = _prefix LIMIT 1 INTO PF_ID;
     
     # entry exists ?
-    IF @PF_ID IS NULL THEN
+    IF PF_ID IS NOT NULL THEN
+        RETURN PF_ID;
+    ELSE
         INSERT INTO prefix_types (prefix) VALUES (_prefix);
-        SET @PF_ID = LAST_INSERT_ID();
+        RETURN LAST_INSERT_ID();
     END IF;
-    
-    RETURN @PF_ID;
 END
 $$
 delimiter ;
@@ -535,19 +554,23 @@ delimiter ;
 # -----------------------------------------------------------------------
 DROP FUNCTION IF EXISTS INSERT_OR_SELECT_INTERFACE;
 delimiter $$
-CREATE FUNCTION INSERT_OR_SELECT_INTERFACE(
-        `_interface` varchar(32)
-        ) RETURNS smallint(5) unsigned
+CREATE FUNCTION INSERT_OR_SELECT_INTERFACE(`oob_if_name` varchar(32))
+    RETURNS smallint(5) unsigned
+    DETERMINISTIC
+    MODIFIES SQL DATA
 BEGIN
-    SELECT _interface_id FROM interfaces WHERE interface_name = _interface LIMIT 1 INTO @IF_ID;
+    # local scope!
+    DECLARE IF_ID SMALLINT(5) unsigned DEFAULT NULL;
+
+    SELECT `_interface_id` FROM `interfaces` WHERE `interface_name` = oob_if_name INTO IF_ID;
 
     # entry exists ?
-    IF @IF_ID IS NULL THEN
-        INSERT INTO interfaces (interface_name) VALUES (_interface);
-        SET @IF_ID = LAST_INSERT_ID();
+    IF IF_ID IS NOT NULL THEN
+        RETURN IF_ID;
+    ELSE
+        INSERT INTO `interfaces` (`interface_name`) VALUES (oob_if_name);
+        RETURN LAST_INSERT_ID();
     END IF;
-        
-    RETURN @IF_ID;
 END
 $$
 delimiter ;
@@ -557,18 +580,50 @@ delimiter ;
 DROP FUNCTION IF EXISTS INSERT_OR_SELECT_REMOTE;
 delimiter $$
 CREATE FUNCTION INSERT_OR_SELECT_REMOTE(
-        ) RETURNS int(10) unsigned
+    ) 
+    RETURNS int(10) unsigned
+    DETERMINISTIC
+    MODIFIES SQL DATA
 BEGIN
+    # local scope!
+    DECLARE REMOTE_ID INT(10) unsigned DEFAULT NULL;
+
     # get remote_id by current user (multihost logging)
-    SELECT `_remote_id` FROM `remotes` WHERE `user`=USER() LIMIT 1 INTO @REMOTE_ID;
+    SELECT `_remote_id` FROM `remotes` WHERE `user`=USER() LIMIT 1 INTO REMOTE_ID;
 
     # entry exists ?
-    IF @REMOTE_ID IS NULL THEN
+    IF REMOTE_ID IS NOT NULL THEN
+        RETURN REMOTE_ID;
+    ELSE
         INSERT INTO `remotes` SET `user`=USER();
-        SET @REMOTE_ID = LAST_INSERT_ID();
+        RETURN LAST_INSERT_ID();
     END IF;
-    
-    RETURN @REMOTE_ID;
+END
+$$
+delimiter ;
+
+# Merge Port View
+# -----------------------------------------------------------------------
+DROP FUNCTION IF EXISTS JOIN_PORTS;
+delimiter $$
+CREATE FUNCTION JOIN_PORTS(
+        `tcp_port` smallint(5) unsigned,
+        `udp_port` smallint(5) unsigned,
+        `sctp_port` smallint(5) unsigned
+    ) 
+    RETURNS smallint(5) unsigned
+    DETERMINISTIC
+    NO SQL
+BEGIN
+    IF tcp_port IS NOT NULL THEN
+        RETURN tcp_port;
+    ELSEIF udp_port IS NOT NULL THEN
+        RETURN udp_port;
+    ELSEIF sctp_port IS NOT NULL THEN
+        RETURN sctp_port;
+    ELSE
+        RETURN NULL;
+    END IF;
 END
 $$
 delimiter ;
@@ -664,58 +719,59 @@ CREATE PROCEDURE CALL_ULOGD2_INSERT(
         #raw_header varchar(256),
         )
 BEGIN
-
-    # MAC src<>dst
-    SET @MAC_ID = NULL;
-    
-    # get nflog prefix
-    SET @PREFIX_ID = INSERT_OR_SELECT_PREFIX(_oob_prefix);
-
-    # get interfaces
-    SET @IF_IN_ID = INSERT_OR_SELECT_INTERFACE(_oob_in);
-    SET @IF_OUT_ID = INSERT_OR_SELECT_INTERFACE(_oob_out);
-
-    # get remote
-    SET @REMOTE_ID = INSERT_OR_SELECT_REMOTE();
-
-    # STD Packet ? And valid mac (layer 2 traffic) ?
-    IF (raw_type = 1 AND mac_saddr_str IS NOT NULL AND mac_daddr_str IS NOT NULL) THEN
-        # insert/get MAC transport relation
-        SET @MAC_ID = INSERT_OR_SELECT_MAC(mac_saddr_str, mac_daddr_str, _oob_protocol);
-    END IF;
+    # local scoped variables
+    DECLARE PACKET_ID BIGINT unsigned DEFAULT NULL;
 
     # insert meta packet (after related items to ensure integrity)
-    SET @PACKET_ID = INSERT_IP_PACKET(@REMOTE_ID, @MAC_ID, @PREFIX_ID, @IF_IN_ID, @IF_OUT_ID,
-                        _oob_time_sec, _oob_time_usec, _oob_hook, _oob_mark, _oob_family, 
-                        _ip_saddr, _ip_daddr, _ip_protocol, _ip_tos, _ip_ttl, _ip_totlen, _ip_ihl, _ip_csum, _ip_id, _ip_fragoff, 
-                        _ip6_payloadlen, _ip6_priority, _ip6_hoplimit, _ip6_flowlabel, _ip6_fragoff, _ip6_fragid, 
-                        raw_label);
+    SET PACKET_ID = INSERT_IP_PACKET(
+        # get remote
+        INSERT_OR_SELECT_REMOTE(),
+
+        # insert/get MAC transport relation
+        INSERT_OR_SELECT_MAC(mac_saddr_str, mac_daddr_str, _oob_protocol, raw_type),
+
+        # get nflog prefix
+        INSERT_OR_SELECT_PREFIX(_oob_prefix),
+
+        # get interfaces
+        INSERT_OR_SELECT_INTERFACE(_oob_in),
+        INSERT_OR_SELECT_INTERFACE(_oob_out),
+
+        # paket payload
+        _oob_time_sec, _oob_time_usec, _oob_hook, _oob_mark, _oob_family, 
+
+        _ip_saddr, _ip_daddr, _ip_protocol, _ip_tos, _ip_ttl, _ip_totlen, _ip_ihl, _ip_csum, _ip_id, _ip_fragoff, 
+
+        _ip6_payloadlen, _ip6_priority, _ip6_hoplimit, _ip6_flowlabel, _ip6_fragoff, _ip6_fragid, 
+
+        raw_label
+    );
 
     # low level Packet ?
     IF raw_type != 1 THEN
-        CALL PACKET_ADD_HARDWARE_HEADER(@PACKET_ID, raw_type, NULL);#raw_header);
+        CALL PACKET_ADD_HARDWARE_HEADER(PACKET_ID, raw_type, NULL);#raw_header);
     END IF;
 
     # protocol dispatching/data linking
     # 6::TCP
     IF _ip_protocol = 6 THEN
-        CALL PACKET_ADD_TCP(@PACKET_ID, tcp_sport, tcp_dport, tcp_seq, tcp_ackseq, tcp_window, tcp_urg, tcp_ack, tcp_psh, tcp_rst, tcp_syn, tcp_fin);
+        CALL PACKET_ADD_TCP(PACKET_ID, tcp_sport, tcp_dport, tcp_seq, tcp_ackseq, tcp_window, tcp_urg, tcp_ack, tcp_psh, tcp_rst, tcp_syn, tcp_fin);
 
     # 17::UDP
     ELSEIF _ip_protocol = 17 THEN
-        CALL PACKET_ADD_UDP(@PACKET_ID, udp_sport, udp_dport, udp_len);
+        CALL PACKET_ADD_UDP(PACKET_ID, udp_sport, udp_dport, udp_len);
 
     # 132::SCTP
     ELSEIF _ip_protocol = 132 THEN
-        CALL PACKET_ADD_SCTP(@PACKET_ID, sctp_sport, sctp_dport, sctp_csum);
+        CALL PACKET_ADD_SCTP(PACKET_ID, sctp_sport, sctp_dport, sctp_csum);
 
     # 1::ICMP
     ELSEIF _ip_protocol = 1 THEN
-        CALL PACKET_ADD_ICMP(@PACKET_ID, icmp_type, icmp_code, icmp_echoid, icmp_echoseq, icmp_gateway, icmp_fragmtu);
+        CALL PACKET_ADD_ICMP(PACKET_ID, icmp_type, icmp_code, icmp_echoid, icmp_echoseq, icmp_gateway, icmp_fragmtu);
 
     # 58::ICMPv6
     ELSEIF _ip_protocol = 58 THEN
-        CALL PACKET_ADD_ICMPV6(@PACKET_ID, icmpv6_type, icmpv6_code, icmpv6_echoid, icmpv6_echoseq, icmpv6_csum);
+        CALL PACKET_ADD_ICMPV6(PACKET_ID, icmpv6_type, icmpv6_code, icmpv6_echoid, icmpv6_echoseq, icmpv6_csum);
 
     END IF;
 END
@@ -958,11 +1014,14 @@ CREATE VIEW `log` AS
         # remote host, mac
         `mac`.`mac_src`, `mac`.`mac_dst`,
         
-        # packet protocol tables
-        `tcp`.`tcp_sport`, `tcp`.`tcp_dport`,
-        `udp`.`udp_sport`, `udp`.`udp_dport`, `udp`.`udp_len`,
+        # ports
+        JOIN_PORTS(`tcp`.`tcp_sport`, `udp`.`udp_sport`, `sctp`.`sctp_sport`) as `sport`,
+        JOIN_PORTS(`tcp`.`tcp_dport`, `udp`.`udp_dport`, `sctp`.`sctp_dport`) as `dport`,
+
+        # protocol related
+        `udp`.`udp_len`,
         `icmp`.`icmp_type`, `icmp_types`.`icmp_type_name`, `icmp`.`icmp_code`, `icmp`.`icmp_gateway`,
-        `sctp`.`sctp_sport`, `sctp`.`sctp_dport`, `sctp`.`sctp_csum`
+        `sctp`.`sctp_csum`
     
     FROM `packets`
         
